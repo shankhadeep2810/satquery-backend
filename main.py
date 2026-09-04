@@ -74,6 +74,16 @@ Analyze this satellite image carefully and answer the user's question.
 User question: {question}
 
 Give a clear, useful answer based only on what can reasonably be observed in the image.
+
+IMPORTANT FORMATTING RULES:
+- Do NOT use Markdown.
+- Do NOT use hashtags (#).
+- Do NOT use asterisks (*).
+- Do NOT use bold formatting (**).
+- Write headings as normal plain text.
+- Put each heading and point on separate lines.
+- Use simple numbered sections and clean paragraphs.
+- Make the answer easy to read in a web application.
 """
 
     # Get AI response
