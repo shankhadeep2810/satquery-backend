@@ -76,14 +76,30 @@ User question: {question}
 Give a clear, useful answer based only on what can reasonably be observed in the image.
 
 IMPORTANT FORMATTING RULES:
-- Do NOT use Markdown.
-- Do NOT use hashtags (#).
-- Do NOT use asterisks (*).
-- Do NOT use bold formatting (**).
-- Write headings as normal plain text.
-- Put each heading and point on separate lines.
-- Use simple numbered sections and clean paragraphs.
-- Make the answer easy to read in a web application.
+Return the answer in plain text only.
+
+Do not use Markdown.
+Do not use hashtags (#).
+Do not use asterisks (*).
+Do not use bold formatting.
+
+Use numbered sections exactly like this:
+
+1. Section Title
+
+Explanation of the section.
+
+2. Next Section Title
+
+Explanation of the next section.
+
+VERY IMPORTANT:
+After every numbered section title, insert exactly one blank line before the explanation.
+After finishing a section, insert exactly one blank line before the next numbered section.
+Never put two numbered sections on the same line.
+Never put "2." or another section number immediately after the previous sentence on the same line.
+
+Use proper line breaks so the answer is easy to read in a web application.
 """
 
     # Get AI response
