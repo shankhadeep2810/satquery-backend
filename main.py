@@ -58,6 +58,13 @@ async def analyze_image(
         io.BytesIO(image_data)
     ).convert("RGB")
 
+    # Resize large images for faster AI analysis
+
+    MAX_SIZE = 1000
+
+    if max(image.size) > MAX_SIZE:
+        image.thumbnail((MAX_SIZE, MAX_SIZE))
+
     # Create AI prompt
     prompt = f"""
 You are SatQuery, an AI assistant specialized in satellite imagery analysis.
