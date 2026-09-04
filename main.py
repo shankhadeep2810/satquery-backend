@@ -60,7 +60,7 @@ async def analyze_image(
 
     # Resize large images for faster AI analysis
 
-    MAX_SIZE = 1000
+    MAX_SIZE = 768
 
     if max(image.size) > MAX_SIZE:
         image.thumbnail((MAX_SIZE, MAX_SIZE))
