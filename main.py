@@ -766,21 +766,73 @@ IMPORTANT RULES:
         # GEMINI GENERATION
         # ----------------------------------------------------
 
-        response = client.models.generate_content(
+                # ----------------------------------------------------
+        # CALL GEMINI WITH RETRY FOR TEMPORARY 503 ERRORS
+        # ----------------------------------------------------
 
-            model="gemini-3.6-flash",
+        response = None
 
-            contents=[
+        max_retries = 3
 
-                prompt,
+        for attempt in range(max_retries):
 
-                before_part,
+            try:
 
-                after_part
+                response = client.models.generate_content(
 
-            ]
+                    model="gemini-3.6-flash",
 
-        )
+                    contents=[
+
+                        prompt,
+
+                        before_part,
+
+                        after_part
+
+                    ]
+
+                )
+
+                break
+
+            except Exception as gemini_error:
+
+                error_text = str(gemini_error)
+
+                is_temporary_error = (
+
+                    "503" in error_text
+
+                    or
+
+                    "UNAVAILABLE" in error_text
+
+                    or
+
+                    "high demand" in error_text
+
+                )
+
+                if not is_temporary_error:
+
+                    raise
+
+                if attempt == max_retries - 1:
+
+                    raise
+
+                wait_seconds = 5 * (2 ** attempt)
+
+                print(
+
+                    f"Gemini temporarily unavailable. "
+
+                    f"Retrying in {wait_seconds} seconds..."
+
+                )
+
+                time.sleep(wait_seconds)
 
 
         # ----------------------------------------------------
