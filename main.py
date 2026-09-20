@@ -644,17 +644,21 @@ async def analyze_image(
         )
 
 
+        # ----------------------------------------------------
+        # DETAILED AI ANALYSIS PROMPT
+        # ----------------------------------------------------
+
         prompt = f"""
 
-You are SatQuery AI, a satellite-image analysis assistant.
+You are SatQuery AI, an advanced satellite-image analysis assistant.
 
-The FIRST image is BEFORE.
-The SECOND image is AFTER.
+The FIRST image is the BEFORE image.
+The SECOND image is the AFTER image.
 
 User question:
 {question}
 
-Numerical change measurements calculated by the backend:
+Backend numerical change measurements:
 
 Changed pixels:
 {change_metrics["changed_pixels"]}
@@ -683,38 +687,58 @@ Mean change:
 Change threshold:
 {change_metrics["change_threshold"]}
 
-Use the images to provide a visual interpretation.
+Analyze BOTH images carefully and answer the user's question using visual evidence together with the backend measurements.
 
-IMPORTANT:
+Your answer MUST contain exactly 7 large, detailed paragraphs.
 
-Do not invent geographic locations,
-causes, dates, measurements,
-or changes that cannot be supported.
+Paragraph 1 — Overall finding:
+Start with a clear overall explanation of what the images show and directly address the user's question. Give the reader a useful high-level understanding before going into details.
 
-The numerical measurements are calculated by the backend.
-Do not present them as independently observed by the AI.
+Paragraph 2 — Detailed visual evidence:
+Describe the important visible features in the images. Discuss observable patterns involving land cover, vegetation, water, buildings, roads, infrastructure, agriculture, terrain, brightness, texture, or other relevant features. Only describe things that can actually be supported by the images.
 
-Focus on observable changes such as:
+Paragraph 3 — Location and spatial distribution:
+Explain where the important differences appear within the image. You may describe regions using terms such as north, south, east, west, center, upper portion, lower portion, or other clearly visible spatial relationships. Do NOT invent coordinates, place names, addresses, or exact geographic locations.
 
-- urban development
-- infrastructure
-- vegetation
-- agriculture
-- water
-- environmental changes
+Paragraph 4 — Before versus after comparison:
+Make a detailed comparison between the BEFORE and AFTER images. Explain what appears to have changed, what appears to have remained similar, and how the visual evidence supports the comparison. If the images do not clearly establish a change, say so instead of guessing.
 
-Return concise plain text.
+Paragraph 5 — Quantitative evidence:
+Use the backend numerical measurements provided above to strengthen the analysis. Explain what the changed-pixel count, change percentage, mean absolute change, maximum change, before mean, after mean, mean change, and threshold indicate when relevant. Make it clear that these are image-level computational measurements. Do NOT convert pixels into hectares, square kilometres, acres, coordinates, or real-world area unless such information is explicitly provided by the backend.
 
-Use numbered points.
+Paragraph 6 — Interpretation:
+Explain the most reasonable interpretation of the observed differences. Clearly separate what is directly visible from what is only a possible explanation. For example, changes in brightness or texture may have multiple causes such as imaging conditions, vegetation conditions, water conditions, construction, or other environmental factors. Never claim a specific cause with certainty unless the images provide sufficient evidence.
 
-For each point provide:
-1. Observation
-2. Evidence
+Paragraph 7 — Conclusion and limitations:
+Give a strong concluding summary of the main finding. State what the visual evidence and numerical measurements collectively suggest. Also mention important limitations, including image quality, resolution, alignment, lighting or acquisition conditions, and the fact that the backend measurements are computational image-level evidence rather than independently validated scientific ground truth.
 
-Do not use Markdown formatting.
+IMPORTANT RULES:
+
+- Give exactly 7 substantial paragraphs.
+- Each paragraph should be detailed and informative, not one or two sentences.
+- Do not use bullet points.
+- Do not use numbered lists.
+- Do not use Markdown headings.
+- Do not give short answers.
+- Do not invent numbers.
+- Do not invent hectares or square-kilometre measurements.
+- Do not invent coordinates.
+- Do not invent dates.
+- Do not invent locations or place names.
+- Do not invent roads, buildings, vegetation, water bodies, or other objects.
+- Do not claim that a change is scientifically proven.
+- Do not claim that the confidence value represents scientifically validated accuracy.
+- Treat the backend numerical measurements as computational evidence.
+- Clearly distinguish observation from interpretation.
+- If something cannot be determined from the images, explicitly say that it cannot be determined reliably.
+- Focus on evidence that a judge can understand from the uploaded images and backend measurements.
 
 """
 
+
+        # ----------------------------------------------------
+        # PREPARE BEFORE IMAGE FOR GEMINI
+        # ----------------------------------------------------
 
         before_part = types.Part.from_bytes(
 
@@ -725,6 +749,10 @@ Do not use Markdown formatting.
         )
 
 
+        # ----------------------------------------------------
+        # PREPARE AFTER IMAGE FOR GEMINI
+        # ----------------------------------------------------
+
         after_part = types.Part.from_bytes(
 
             data=after_preview,
@@ -733,6 +761,10 @@ Do not use Markdown formatting.
 
         )
 
+
+        # ----------------------------------------------------
+        # GEMINI GENERATION
+        # ----------------------------------------------------
 
         response = client.models.generate_content(
 
@@ -750,6 +782,10 @@ Do not use Markdown formatting.
 
         )
 
+
+        # ----------------------------------------------------
+        # GET AI ANSWER
+        # ----------------------------------------------------
 
         ai_answer = response.text
 
@@ -820,7 +856,10 @@ Do not use Markdown formatting.
         }
 
 
-        # Add geospatial information
+        # ----------------------------------------------------
+        # ADD BEFORE GEOSPATIAL INFORMATION
+        # ----------------------------------------------------
+
         if before_raster:
 
             result[
@@ -839,6 +878,10 @@ Do not use Markdown formatting.
             }
 
 
+        # ----------------------------------------------------
+        # ADD AFTER GEOSPATIAL INFORMATION
+        # ----------------------------------------------------
+
         if after_raster:
 
             result[
@@ -856,6 +899,10 @@ Do not use Markdown formatting.
 
             }
 
+
+        # ----------------------------------------------------
+        # RETURN SUCCESS
+        # ----------------------------------------------------
 
         return result
 
