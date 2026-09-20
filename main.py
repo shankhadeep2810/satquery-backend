@@ -3,7 +3,6 @@ import io
 import traceback
 
 import numpy as np
-
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -14,23 +13,33 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
+try:
+    import rasterio
+    RASTERIO_AVAILABLE = True
+except ImportError:
+    RASTERIO_AVAILABLE = False
 
-# Load .env file
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
 load_dotenv()
 
-
-# Get Gemini API key
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 
-# Create FastAPI application
+# ============================================================
+# FASTAPI
+# ============================================================
+
 app = FastAPI(
     title="SatQuery AI Backend",
-    description="AI-powered Satellite Image Change Detection API"
+    description="AI-powered Satellite Image Change Detection API",
+    version="1.0.0"
 )
 
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,17 +49,403 @@ app.add_middleware(
 )
 
 
-# Home route
+# ============================================================
+# HOME
+# ============================================================
+
 @app.get("/")
 def home():
 
     return {
         "message": "SatQuery AI Backend is running successfully!",
-        "api_key_found": bool(API_KEY)
+        "api_key_found": bool(API_KEY),
+        "rasterio_available": RASTERIO_AVAILABLE
     }
 
 
-# Analyze satellite images
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy",
+        "service": "SatQuery AI Backend",
+        "gemini_configured": bool(API_KEY),
+        "rasterio_available": RASTERIO_AVAILABLE
+    }
+
+
+# ============================================================
+# IMAGE HELPERS
+# ============================================================
+
+MAX_PREVIEW_SIZE = 1024
+
+
+def is_tiff(filename: str) -> bool:
+
+    filename = filename.lower()
+
+    return filename.endswith(".tif") or filename.endswith(".tiff")
+
+
+async def read_upload(upload: UploadFile):
+
+    data = await upload.read()
+
+    if not data:
+
+        raise ValueError(
+            f"{upload.filename} is empty."
+        )
+
+    return data
+
+
+# ============================================================
+# RASTERIO TIFF READER
+# ============================================================
+
+def read_tiff(data: bytes):
+
+    if not RASTERIO_AVAILABLE:
+
+        raise RuntimeError(
+            "Rasterio is required for TIFF/GeoTIFF files. "
+            "Run: pip install rasterio"
+        )
+
+    with rasterio.MemoryFile(data) as memfile:
+
+        with memfile.open() as dataset:
+
+            array = dataset.read(
+                out_dtype="float32"
+            )
+
+            width = dataset.width
+            height = dataset.height
+
+            crs = str(dataset.crs) if dataset.crs else None
+
+            transform = str(dataset.transform)
+
+            bounds = {
+                "left": dataset.bounds.left,
+                "bottom": dataset.bounds.bottom,
+                "right": dataset.bounds.right,
+                "top": dataset.bounds.top
+            }
+
+            nodata = dataset.nodata
+
+    return {
+        "array": array,
+        "width": width,
+        "height": height,
+        "bands": array.shape[0],
+        "crs": crs,
+        "transform": transform,
+        "bounds": bounds,
+        "nodata": nodata
+    }
+
+
+# ============================================================
+# NORMAL IMAGE READER
+# ============================================================
+
+def read_normal_image(data: bytes):
+
+    image = Image.open(
+        io.BytesIO(data)
+    ).convert("RGB")
+
+    width, height = image.size
+
+    if max(width, height) > MAX_PREVIEW_SIZE:
+
+        image.thumbnail(
+            (MAX_PREVIEW_SIZE, MAX_PREVIEW_SIZE)
+        )
+
+    array = np.asarray(
+        image,
+        dtype=np.float32
+    )
+
+    return {
+        "image": image,
+        "array": array,
+        "width": image.width,
+        "height": image.height
+    }
+
+
+# ============================================================
+# TIFF → PREVIEW JPEG
+# ============================================================
+
+def tiff_to_preview(raster):
+
+    array = raster["array"]
+
+    # Use first band for a simple preview.
+    band = array[0]
+
+    valid = np.isfinite(band)
+
+    if not np.any(valid):
+
+        raise ValueError(
+            "TIFF contains no valid numerical pixels."
+        )
+
+    values = band[valid]
+
+    low = np.percentile(values, 2)
+    high = np.percentile(values, 98)
+
+    if high <= low:
+
+        high = low + 1
+
+    normalized = (
+        (band - low) /
+        (high - low)
+    )
+
+    normalized = np.clip(
+        normalized,
+        0,
+        1
+    )
+
+    normalized = (
+        normalized * 255
+    ).astype(np.uint8)
+
+    image = Image.fromarray(
+        normalized,
+        mode="L"
+    )
+
+    if max(image.size) > MAX_PREVIEW_SIZE:
+
+        image.thumbnail(
+            (MAX_PREVIEW_SIZE, MAX_PREVIEW_SIZE)
+        )
+
+    buffer = io.BytesIO()
+
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=90
+    )
+
+    return buffer.getvalue()
+
+
+# ============================================================
+# NORMAL IMAGE → JPEG
+# ============================================================
+
+def image_to_preview(image):
+
+    buffer = io.BytesIO()
+
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=90
+    )
+
+    return buffer.getvalue()
+
+
+# ============================================================
+# NUMERICAL CHANGE DETECTION
+# ============================================================
+
+def calculate_change(before, after):
+
+    before_array = before
+    after_array = after
+
+    # Convert multi-band raster to mean intensity
+    if before_array.ndim == 3:
+
+        before_array = np.nanmean(
+            before_array,
+            axis=0
+        )
+
+    if after_array.ndim == 3:
+
+        after_array = np.nanmean(
+            after_array,
+            axis=0
+        )
+
+    # Resize to common dimensions if necessary
+    common_height = min(
+        before_array.shape[0],
+        after_array.shape[0]
+    )
+
+    common_width = min(
+        before_array.shape[1],
+        after_array.shape[1]
+    )
+
+    before_array = before_array[
+        :common_height,
+        :common_width
+    ]
+
+    after_array = after_array[
+        :common_height,
+        :common_width
+    ]
+
+    valid = (
+        np.isfinite(before_array)
+        &
+        np.isfinite(after_array)
+    )
+
+    before_valid = before_array[valid]
+    after_valid = after_array[valid]
+
+    if before_valid.size == 0:
+
+        raise ValueError(
+            "No valid overlapping pixels were found."
+        )
+
+    difference = np.abs(
+        after_valid - before_valid
+    )
+
+    mean_difference = float(
+        np.mean(difference)
+    )
+
+    maximum_difference = float(
+        np.max(difference)
+    )
+
+    before_mean = float(
+        np.mean(before_valid)
+    )
+
+    after_mean = float(
+        np.mean(after_valid)
+    )
+
+    mean_change = after_mean - before_mean
+
+    # Adaptive threshold based on observed differences
+    threshold = float(
+        np.mean(difference)
+        +
+        2 * np.std(difference)
+    )
+
+    changed_pixels = int(
+        np.sum(
+            difference > threshold
+        )
+    )
+
+    total_pixels = int(
+        difference.size
+    )
+
+    change_percentage = (
+        changed_pixels /
+        total_pixels
+    ) * 100
+
+    return {
+
+        "changed_pixels": changed_pixels,
+
+        "total_pixels": total_pixels,
+
+        "change_percentage": round(
+            float(change_percentage),
+            2
+        ),
+
+        "mean_absolute_change": round(
+            mean_difference,
+            4
+        ),
+
+        "maximum_change": round(
+            maximum_difference,
+            4
+        ),
+
+        "before_mean": round(
+            before_mean,
+            4
+        ),
+
+        "after_mean": round(
+            after_mean,
+            4
+        ),
+
+        "mean_change": round(
+            mean_change,
+            4
+        ),
+
+        "change_threshold": round(
+            threshold,
+            4
+        )
+    }
+
+
+# ============================================================
+# CONFIDENCE ESTIMATION
+# ============================================================
+
+def calculate_confidence(
+    change_percentage,
+    valid_pixels
+):
+
+    if valid_pixels < 100:
+
+        return 30.0
+
+    if change_percentage < 1:
+
+        return 60.0
+
+    if change_percentage < 5:
+
+        return 70.0
+
+    if change_percentage < 20:
+
+        return 80.0
+
+    return 90.0
+
+
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
+
 @app.post("/analyze-image")
 async def analyze_image(
 
@@ -64,239 +459,405 @@ async def analyze_image(
 
     try:
 
-        # Check API key
+        # ----------------------------------------------------
+        # API KEY
+        # ----------------------------------------------------
+
         if not API_KEY:
 
             return {
+
                 "status": "error",
-                "error": "GEMINI_API_KEY was not found in your .env file"
+
+                "error":
+                    "GEMINI_API_KEY was not found "
+                    "in your .env file"
+
             }
 
 
-        # Read BEFORE image
-        before_data = await before_file.read()
+        # ----------------------------------------------------
+        # READ FILES
+        # ----------------------------------------------------
+
+        before_data = await read_upload(
+            before_file
+        )
+
+        after_data = await read_upload(
+            after_file
+        )
 
 
-        # Read AFTER image
-        after_data = await after_file.read()
+        # ----------------------------------------------------
+        # DETERMINE FILE TYPE
+        # ----------------------------------------------------
+
+        before_is_tiff = is_tiff(
+            before_file.filename
+        )
+
+        after_is_tiff = is_tiff(
+            after_file.filename
+        )
 
 
-        # Check images are not empty
-        if not before_data:
+        # ----------------------------------------------------
+        # READ TIFF / NORMAL IMAGE
+        # ----------------------------------------------------
 
-            return {
-                "status": "error",
-                "error": "BEFORE image is empty"
-            }
-
-
-        if not after_data:
-
-            return {
-                "status": "error",
-                "error": "AFTER image is empty"
-            }
+        before_raster = None
+        after_raster = None
 
 
-        # Open BEFORE image for validation
-        before_image = Image.open(
-            io.BytesIO(before_data)
-        ).convert("RGB")
+        if before_is_tiff:
 
+            before_raster = read_tiff(
+                before_data
+            )
 
-        # Open AFTER image for validation
-        after_image = Image.open(
-            io.BytesIO(after_data)
-        ).convert("RGB")
+            before_array = (
+                before_raster["array"]
+            )
 
+            before_preview = tiff_to_preview(
+                before_raster
+            )
 
-        # Resize images for faster processing
-        MAX_SIZE = 1024
+            before_width = (
+                before_raster["width"]
+            )
 
+            before_height = (
+                before_raster["height"]
+            )
 
-        if max(before_image.size) > MAX_SIZE:
+        else:
 
-            before_image.thumbnail(
-                (MAX_SIZE, MAX_SIZE)
+            before_image_data = (
+                read_normal_image(
+                    before_data
+                )
+            )
+
+            before_array = (
+                before_image_data["array"]
+            )
+
+            before_preview = (
+                image_to_preview(
+                    before_image_data["image"]
+                )
+            )
+
+            before_width = (
+                before_image_data["width"]
+            )
+
+            before_height = (
+                before_image_data["height"]
             )
 
 
-        if max(after_image.size) > MAX_SIZE:
+        if after_is_tiff:
 
-            after_image.thumbnail(
-                (MAX_SIZE, MAX_SIZE)
+            after_raster = read_tiff(
+                after_data
+            )
+
+            after_array = (
+                after_raster["array"]
+            )
+
+            after_preview = tiff_to_preview(
+                after_raster
+            )
+
+            after_width = (
+                after_raster["width"]
+            )
+
+            after_height = (
+                after_raster["height"]
+            )
+
+        else:
+
+            after_image_data = (
+                read_normal_image(
+                    after_data
+                )
+            )
+
+            after_array = (
+                after_image_data["array"]
+            )
+
+            after_preview = (
+                image_to_preview(
+                    after_image_data["image"]
+                )
+            )
+
+            after_width = (
+                after_image_data["width"]
+            )
+
+            after_height = (
+                after_image_data["height"]
             )
 
 
-        # Save resized BEFORE image to memory
-        before_buffer = io.BytesIO()
+        # ----------------------------------------------------
+        # CALCULATE NUMERICAL CHANGE
+        # ----------------------------------------------------
 
-        before_image.save(
-            before_buffer,
-            format="JPEG",
-            quality=90
-        )
-
-        before_image_bytes = before_buffer.getvalue()
-
-
-        # Save resized AFTER image to memory
-        after_buffer = io.BytesIO()
-
-        after_image.save(
-            after_buffer,
-            format="JPEG",
-            quality=90
-        )
-
-        after_image_bytes = after_buffer.getvalue()
-
-
-        # Create Gemini client
-        client = genai.Client(
-            api_key=API_KEY
+        change_metrics = calculate_change(
+            before_array,
+            after_array
         )
 
 
-        # Create AI prompt
-        prompt = f"""
-You are SatQuery, an AI system specialized in satellite image change detection.
+        # ----------------------------------------------------
+        # CONFIDENCE
+        # ----------------------------------------------------
 
-You are given two satellite images of the same geographical area.
+        confidence = calculate_confidence(
 
-The FIRST image is the BEFORE image.
-The SECOND image is the AFTER image.
+            change_metrics[
+                "change_percentage"
+            ],
 
-User question:
-{question}
-
-Compare the images carefully and identify only significant, visually observable changes.
-
-Focus on important changes such as:
-- Urban or infrastructure development
-- Vegetation or land cover changes
-- Agricultural changes
-- Water body changes
-- Major environmental changes
-
-IMPORTANT RULES:
-
-Only report changes that are clearly supported by the images.
-
-Do not invent locations, dates, causes, measurements, or information that cannot be visually confirmed.
-
-Prioritize the 2 to 4 most important observations.
-
-If no significant change is clearly visible, say:
-"No significant visually observable change could be confidently identified."
-
-Keep the response concise, professional, and suitable for a Smart India Hackathon project demonstration.
-
-Return plain text only.
-
-Use numbered points.
-
-For each point, write a short professional title followed by a concise explanation.
-
-Do not use Markdown, hashtags, asterisks, or bold formatting.
-
-Do not provide unnecessary background information or long descriptions.
-"""
-
-
-        # Create BEFORE image part
-        before_part = types.Part.from_bytes(
-            data=before_image_bytes,
-            mime_type="image/jpeg"
-        )
-
-
-        # Create AFTER image part
-        after_part = types.Part.from_bytes(
-            data=after_image_bytes,
-            mime_type="image/jpeg"
-        )
-
-
-        # Send prompt and BOTH images to Gemini
-        response = client.models.generate_content(
-
-            model="gemini-3.6-flash",
-
-            contents=[
-                prompt,
-                before_part,
-                after_part
+            change_metrics[
+                "total_pixels"
             ]
 
         )
 
 
-        # Get AI response safely
-        ai_answer = response.text
+        # ----------------------------------------------------
+        # GEMINI
+        # ----------------------------------------------------
 
+        client = genai.Client(
+            api_key=API_KEY
+        )
+
+
+        prompt = f"""
+
+You are SatQuery AI, a satellite-image analysis assistant.
+
+The FIRST image is BEFORE.
+The SECOND image is AFTER.
+
+User question:
+{question}
+
+Numerical change measurements calculated by the backend:
+
+Changed pixels:
+{change_metrics["changed_pixels"]}
+
+Total pixels:
+{change_metrics["total_pixels"]}
+
+Change percentage:
+{change_metrics["change_percentage"]}%
+
+Mean absolute change:
+{change_metrics["mean_absolute_change"]}
+
+Maximum change:
+{change_metrics["maximum_change"]}
+
+Before mean:
+{change_metrics["before_mean"]}
+
+After mean:
+{change_metrics["after_mean"]}
+
+Mean change:
+{change_metrics["mean_change"]}
+
+Change threshold:
+{change_metrics["change_threshold"]}
+
+Use the images to provide a visual interpretation.
+
+IMPORTANT:
+
+Do not invent geographic locations,
+causes, dates, measurements,
+or changes that cannot be supported.
+
+The numerical measurements are calculated by the backend.
+Do not present them as independently observed by the AI.
+
+Focus on observable changes such as:
+
+- urban development
+- infrastructure
+- vegetation
+- agriculture
+- water
+- environmental changes
+
+Return concise plain text.
+
+Use numbered points.
+
+For each point provide:
+1. Observation
+2. Evidence
+
+Do not use Markdown formatting.
+
+"""
+
+
+        before_part = types.Part.from_bytes(
+
+            data=before_preview,
+
+            mime_type="image/jpeg"
+
+        )
+
+
+        after_part = types.Part.from_bytes(
+
+            data=after_preview,
+
+            mime_type="image/jpeg"
+
+        )
+
+
+        response = client.models.generate_content(
+
+            model="gemini-3.6-flash",
+
+            contents=[
+
+                prompt,
+
+                before_part,
+
+                after_part
+
+            ]
+
+        )
+
+
+        ai_answer = response.text
 
         if not ai_answer:
 
-            ai_answer = "The AI did not return a text response."
-
-
-        # Convert images to arrays
-        before_array = np.array(before_image)
-
-        after_array = np.array(after_image)
-
-
-        # Get image dimensions
-        before_width, before_height = before_image.size
-
-        after_width, after_height = after_image.size
-
-
-        # Calculate brightness
-        before_brightness = float(
-            np.mean(before_array)
-        )
-
-        after_brightness = float(
-            np.mean(after_array)
-        )
-
-
-        # Return successful result
-        return {
-
-            "status": "analysis_complete",
-
-            "message": "Satellite image analysis completed successfully!",
-
-            "ai_answer": ai_answer,
-
-            "before_filename": before_file.filename,
-
-            "after_filename": after_file.filename,
-
-            "user_question": question,
-
-            "before_image_width": before_width,
-
-            "before_image_height": before_height,
-
-            "after_image_width": after_width,
-
-            "after_image_height": after_height,
-
-            "before_average_brightness": round(
-                before_brightness,
-                2
-            ),
-
-            "after_average_brightness": round(
-                after_brightness,
-                2
+            ai_answer = (
+                "The AI did not return "
+                "a text response."
             )
 
+
+        # ----------------------------------------------------
+        # RETURN RESULT
+        # ----------------------------------------------------
+
+        result = {
+
+            "status":
+                "analysis_complete",
+
+            "message":
+                "Satellite image analysis "
+                "completed successfully!",
+
+            "ai_answer":
+                ai_answer,
+
+            "before_filename":
+                before_file.filename,
+
+            "after_filename":
+                after_file.filename,
+
+            "user_question":
+                question,
+
+            "before_image_width":
+                before_width,
+
+            "before_image_height":
+                before_height,
+
+            "after_image_width":
+                after_width,
+
+            "after_image_height":
+                after_height,
+
+            "change_metrics":
+                change_metrics,
+
+            "confidence":
+                round(
+                    confidence,
+                    2
+                ),
+
+            "before_format":
+                "GeoTIFF"
+                if before_is_tiff
+                else "Image",
+
+            "after_format":
+                "GeoTIFF"
+                if after_is_tiff
+                else "Image"
+
         }
+
+
+        # Add geospatial information
+        if before_raster:
+
+            result[
+                "before_geospatial"
+            ] = {
+
+                "crs":
+                    before_raster["crs"],
+
+                "bounds":
+                    before_raster["bounds"],
+
+                "bands":
+                    before_raster["bands"]
+
+            }
+
+
+        if after_raster:
+
+            result[
+                "after_geospatial"
+            ] = {
+
+                "crs":
+                    after_raster["crs"],
+
+                "bounds":
+                    after_raster["bounds"],
+
+                "bands":
+                    after_raster["bands"]
+
+            }
+
+
+        return result
 
 
     except Exception as e:
@@ -308,21 +869,28 @@ Do not provide unnecessary background information or long descriptions.
         full_error = traceback.format_exc()
 
 
-        print("\n========== SATQUERY ERROR ==========")
+        print(
+            "\n========== SATQUERY ERROR =========="
+        )
 
         print(full_error)
 
-        print("====================================\n")
+        print(
+            "====================================\n"
+        )
 
 
         return {
 
             "status": "error",
 
-            "error_type": error_type,
+            "error_type":
+                error_type,
 
-            "error_message": error_message,
+            "error_message":
+                error_message,
 
-            "details": full_error
+            "details":
+                full_error
 
         }
